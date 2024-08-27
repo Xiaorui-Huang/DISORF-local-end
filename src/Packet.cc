@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "Packet.h"
+#include <netdb.h>
 
 PacketSerializer::PacketSerializer(const char * addr, unsigned short port) {
 	this->addr = addr;
@@ -29,8 +30,13 @@ int PacketSerializer::start() {
 	struct sockaddr_in addr;
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(this->port);
-	status = inet_pton(AF_INET, this->addr, &addr.sin_addr);
-	if(status <= 0) return -2; // Address not supported
+    
+    // Resolve the address
+	struct hostent *he;
+	if ((he = gethostbyname(this->addr)) == NULL)
+		return -2; // Unable to resolve hostname
+    addr.sin_addr = *((struct in_addr *)he->h_addr);
+
 	status = connect(ref, (struct sockaddr *)&addr, sizeof(addr));
 	if(status < 0) return -3; // Connection failed
 	this->socket = ref;
