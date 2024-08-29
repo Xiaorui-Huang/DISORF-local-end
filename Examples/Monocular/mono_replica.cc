@@ -39,7 +39,7 @@ void LoadImages(const string &path, vector<string> &vstrImageFilenames, vector<d
 int main(int argc, char **argv)
 {
     bool bUseViewer;
-    char address[16] = "127.0.0.1";
+    char address[254] = "127.0.0.1"; // max domain length 253 char
     unsigned short port = 5001;
 
     // Updated usage check

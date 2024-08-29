@@ -32,7 +32,7 @@ bool InitializeAndCapture(VideoCapture& cap, cv::Mat& imRGB, double& tframe) {
 
 int main(int argc, char **argv)
 {
-    char address[16] = "127.0.0.1";
+    char address[254] = "127.0.0.1"; // max domain length 253 char
     unsigned short port = 5001;
 
     // Updated usage check
