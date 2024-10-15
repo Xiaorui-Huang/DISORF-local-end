@@ -9,13 +9,10 @@
 #include <mutex>
 #include <condition_variable>
 #include <thread>
-#include <string>
 
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
-
-void parseAddressPort(std::string& input, char* address, unsigned short& port);
 
 class PacketSerializer {
 
@@ -29,6 +26,9 @@ class PacketSerializer {
 			   ~PacketSerializer();
 		int		start();
 		int		write(int type, const char * data, int size);
+
+		// Function to set SO_MAX_PACING_RATE for bandwidth control
+		int		setPacingRate(size_t rate);
 };
 
 class Packet {

@@ -1,20 +1,9 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
-#include <iostream>
-
-#include <queue>
-#include <mutex>
-#include <condition_variable>
-#include <thread>
-
-#include <arpa/inet.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
 #include "Packet.h"
-#include <netdb.h>
+#include <iostream>
+#include <netinet/tcp.h>  // For TCP options like SO_MAX_PACING_RATE
+
+// Define the global bandwidth limit (in bytes per second)
+size_t GLOBAL_BANDWIDTH_LIMIT = 1024 * 512;  // default: 512 KB/sec
 
 PacketSerializer::PacketSerializer(const char * addr, unsigned short port) {
 	this->addr = addr;
@@ -23,29 +12,39 @@ PacketSerializer::PacketSerializer(const char * addr, unsigned short port) {
 }
 
 int PacketSerializer::start() {
-	std::cout << "#################################" << std::endl;
 	int status;
 	int ref = ::socket(AF_INET, SOCK_STREAM, 0);
-	if(ref < 0) return -1; // Unable to initialized socket
+	if (ref < 0) return -1;  // Unable to initialize socket
+
 	struct sockaddr_in addr;
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(this->port);
-    
-    // Resolve the address
-	struct hostent *he;
-	if ((he = gethostbyname(this->addr)) == NULL)
-		return -2; // Unable to resolve hostname
-    addr.sin_addr = *((struct in_addr *)he->h_addr);
+	status = inet_pton(AF_INET, this->addr, &addr.sin_addr);
+	if (status <= 0) return -2;  // Address not supported
 
 	status = connect(ref, (struct sockaddr *)&addr, sizeof(addr));
-	if(status < 0) return -3; // Connection failed
+	if (status < 0) return -3;  // Connection failed
+
 	this->socket = ref;
-	return 0; // Success
+
+	// Set pacing rate (bandwidth limit) using SO_MAX_PACING_RATE
+	if (setPacingRate(GLOBAL_BANDWIDTH_LIMIT) != 0) {
+		std::cerr << "Failed to set pacing rate" << std::endl;
+		return -4;  // Failed to set pacing rate
+	}
+
+	return 0;  // Success
 }
 
 PacketSerializer::~PacketSerializer() {
-	if(this->socket < 0) return;
+	if (this->socket < 0) return;
 	close(this->socket);
+}
+
+// Method to set SO_MAX_PACING_RATE for controlling bandwidth
+int PacketSerializer::setPacingRate(size_t rate) {
+	// Set the pacing rate in bytes per second
+	return setsockopt(this->socket, SOL_SOCKET, SO_MAX_PACING_RATE, &rate, sizeof(rate));
 }
 
 int PacketSerializer::write(int type, const char * data, int size) {
@@ -57,13 +56,15 @@ int PacketSerializer::write(int type, const char * data, int size) {
 	*((unsigned int   *)&buf1[4]) = htonl((unsigned int)size);
 	*((unsigned short *)&buf1[8]) = htons(chksum1);
 	*((unsigned short *)&buf2[0]) = htons(chksum2);
+
 	send(this->socket, buf1, sizeof(buf1), 0);
-	send(this->socket, data, size,         0);
+	send(this->socket, data, size, 0);
 	send(this->socket, buf2, sizeof(buf2), 0);
-	return 0; // Success
+	
+	return 0;  // Success
 }
 
-
+// ConcurrentQueue member function definitions (unchanged)
 template <typename T>
 void ConcurrentQueue<T>::push(T & obj) {
 	std::unique_lock<std::mutex> lockobj(this->mutex);
@@ -96,14 +97,14 @@ size_t ConcurrentQueue<T>::size() {
 	return this->queue.size();
 }
 
-
+// PacketDeserializerWorker (unchanged)
 PacketDeserializerWorker::PacketDeserializerWorker(int socket, ConcurrentQueue<Packet> & pipe) {
 	this->socket = socket;
 	this->pipe = &pipe;
 }
 
 PacketDeserializerWorker::~PacketDeserializerWorker() {
-	if(this->socket < 0) return;
+	if (this->socket < 0) return;
 	close(this->socket);
 }
 
@@ -116,34 +117,32 @@ void PacketDeserializerWorker::run() {
 		int size;
 		unsigned short chksum;
 	}
-	// TODO: change to plain array to avoid
-	// packed issues on some ARM platforms
 	__attribute__((packed)) header;
-	while(true) {
-		int status;
-		status = read(this->socket, &header, sizeof(header));
-		if(status <= 0) {
+
+	while (true) {
+		int status = read(this->socket, &header, sizeof(header));
+		if (status <= 0) {
 #ifdef DEBUG
 			cout << "[B] Header read fail" << endl;
 #endif
 			break;
 		}
-		if(status != sizeof(header)) {
+		if (status != sizeof(header)) {
 #ifdef DEBUG
-			cout << "[C] Invalid hader" << endl;
+			cout << "[C] Invalid header" << endl;
 #endif
 			continue;
 		}
 		header.type = ntohl(header.type);
 		header.size = ntohl(header.size);
 		header.chksum = ntohs(header.chksum);
-		if(header.chksum != 0xABCD) {
+		if (header.chksum != 0xABCD) {
 #ifdef DEBUG
 			cout << "[C] Invalid header chksum" << endl;
 #endif
 			continue;
 		}
-		if(header.type < 0) {
+		if (header.type < 0) {
 #ifdef DEBUG
 			cout << "[B] Header type signal" << endl;
 #endif
@@ -151,14 +150,14 @@ void PacketDeserializerWorker::run() {
 		}
 		char * buffer = new char[header.size];
 		status = read(this->socket, buffer, header.size);
-		if(status <= 0) {
+		if (status <= 0) {
 #ifdef DEBUG
 			cout << "[B] Payload read fail" << endl;
 #endif
 			delete[] buffer;
 			break;
 		}
-		if(status != header.size) {
+		if (status != header.size) {
 #ifdef DEBUG
 			cout << "[C] Invalid payload" << endl;
 #endif
@@ -168,7 +167,7 @@ void PacketDeserializerWorker::run() {
 		unsigned short chksum2;
 		status = read(this->socket, &chksum2, sizeof(chksum2));
 		chksum2 = ntohs(chksum2);
-		if(chksum2 != 0xDCBA) {
+		if (chksum2 != 0xDCBA) {
 #ifdef DEBUG
 			cout << "[C] Invalid payload chksum" << endl;
 #endif
@@ -191,8 +190,7 @@ void PacketDeserializerWorker::run() {
 	this->socket = -1;
 }
 
-
-
+// PacketDeserializer member function definitions (unchanged)
 PacketDeserializer::PacketDeserializer(unsigned short port) {
 	this->port = port;
 	this->listener = -1;
@@ -200,35 +198,36 @@ PacketDeserializer::PacketDeserializer(unsigned short port) {
 }
 
 PacketDeserializer::~PacketDeserializer() {
-	if(this->listenerThread);
-		delete this->listenerThread;
-	while(this->pipe.size() > 0) {
+	if (this->listenerThread) delete this->listenerThread;
+	while (this->pipe.size() > 0) {
 		Packet * obj;
 		this->pipe.pop(*obj);
-		if(obj->payload)
-			delete[] obj->payload;
+		if (obj->payload) delete[] obj->payload;
 		delete obj;
 	}
-	if(this->listener > 0)
-		shutdown(this->listener, SHUT_RDWR);
+	if (this->listener > 0) shutdown(this->listener, SHUT_RDWR);
 	std::cout << "Main destruction" << std::endl;
 }
 
 int PacketDeserializer::start() {
 	int status;
 	int listener = socket(AF_INET, SOCK_STREAM, 0);
-	if(listener < 0) return -1; // Listener creation failed
+	if (listener < 0) return -1;  // Listener creation failed
+
 	struct sockaddr_in addr;
 	int opt = 1;
 	status = setsockopt(listener, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
-	if(status) return -2; // Listener settings failed
+	if (status) return -2;  // Listener settings failed
+
 	addr.sin_family = AF_INET;
 	addr.sin_addr.s_addr = INADDR_ANY;
 	addr.sin_port = htons(this->port);
 	status = bind(listener, (struct sockaddr*)&addr, sizeof(addr));
-	if(status < 0) return -3; // Listener binding failed
-	status = listen(listener, 5); // Backlog 5 connections
-	if(status < 0) return -4; // Listener listening failed
+	if (status < 0) return -3;  // Listener binding failed
+
+	status = listen(listener, 5);  // Backlog 5 connections
+	if (status < 0) return -4;  // Listener listening failed
+
 	this->listener = listener;
 	this->listenerThread = new std::thread(&PacketDeserializer::run, this);
 	return 0;
@@ -238,11 +237,11 @@ void PacketDeserializer::run() {
 #ifdef DEBUG
 	using namespace std;
 #endif
-	while(true) {
+	while (true) {
 		struct sockaddr_in addr;
 		int addrlen = sizeof(addr);
 		int socket = accept(this->listener, (struct sockaddr *)&addr, (socklen_t *)&addrlen);
-		if(socket < 0) {
+		if (socket < 0) {
 #ifdef DEBUG
 			cout << "[C] Failed to accept connection" << endl;
 #endif
@@ -262,18 +261,4 @@ void PacketDeserializer::run() {
 
 void PacketDeserializer::read(Packet & obj) {
 	this->pipe.pop(obj);
-}
-
-void parseAddressPort(std::string& input, char* address, unsigned short& port) {
-    size_t colonPos = input.find(':');
-    
-    if (colonPos != std::string::npos) {
-        // Both address and port are provided
-        strcpy(address, input.substr(0, colonPos).c_str());
-        port = (unsigned short)std::stoi(input.substr(colonPos + 1));
-    } else {
-        // Only port is provided
-        address = "127.0.0.1";
-        port = (unsigned short)std::stoi(input);
-    }
 }
